@@ -34,19 +34,24 @@ func TestSetAncestorsGeneral(t *testing.T) {
 		Generations:  GENERATIONS,
 		GrowthRate:   1.01,
 		MatingK:      50,
+		Monogamous:   true,
 		Compatible:   false,
 	}
 	simulation := NewSimulation(&parameters)
 	simulation.Simulate()
+	print("Debug A", len(simulation.agents))
 	assert.Equal(t, len(simulation.agents) > 20, true, "At least 21 agents")
 	generation := simulation.agents[len(simulation.agents)-1].generation
 	counter := 0
-	simulation.setAncestorsCurrGen()
+	simulation.setAncestorsGen(generation)
 	for _, agent := range simulation.agents {
 		if agent.generation == generation {
-			require.Equal(t, len(agent.ancestorSet) > 0, true, "ancestor set has elements for last generation agent")
-			require.Equal(t, len(agent.ancestorVec) > 0, true, "ancestor vector has elements for last generation agent")
-			require.Equal(t, len(agent.ancestorSet), len(agent.ancestorVec), "set and vector have same number of elemnts")
+			require.Equal(t, len(agent.ancestorSet) > 0, true,
+				"ancestor set has elements for last generation agent")
+			require.Equal(t, len(agent.ancestorVec) > 0, true,
+				"ancestor vector has elements for last generation agent")
+			require.Equal(t, len(agent.ancestorSet), len(agent.ancestorVec),
+				"set and vector have same number of elemnts")
 			counter++
 		} else {
 			require.Equal(t, len(agent.ancestorSet), 0, "ancestor set has 0 elements for not last generation agent")
@@ -60,7 +65,7 @@ func setupSim(t *testing.T) *Simulation {
 	agents := []Agent{
 		{
 			id:         0,
-			generation: 1,
+			generation: 0,
 			sex:        MALE,
 			mother:     0,
 			father:     0,
@@ -168,9 +173,14 @@ func setupSim(t *testing.T) *Simulation {
 	parameters := NewParameters()
 	simulation := NewSimulation(&parameters)
 	simulation.agents = agents
-	simulation.setCurrGen()
+	simulation.SetGenBdrys()
+	simulation.setCurrGen(3)
 	assert.Equal(t, len(simulation.agents), 14, "Correct number of agents")
-	assert.Equal(t, simulation.startCurrGen, 9, "Start current gen is correct")
+	assert.Equal(t, len(simulation.genBdrys), 4, "Correct length of genBdrys")
+	assert.Equal(t, simulation.genBdrys[0], 2, "Correct first entry genBdrys")
+	assert.Equal(t, simulation.genBdrys[1], 5, "Correct second entry genBdrys")
+	assert.Equal(t, simulation.genBdrys[2], 9, "Correct third entry genBdrys")
+	assert.Equal(t, simulation.genBdrys[3], 14, "Correct fourth entry genBdrys")
 	assert.Equal(t, len(simulation.currGen), 5, "Current gen has correct number of agents")
 	return simulation
 }
@@ -185,7 +195,7 @@ func setToVec(m map[int]struct{}) []int {
 
 func TestSetAncestorsSpecific(t *testing.T) {
 	simulation := setupSim(t)
-	simulation.setAncestorsCurrGen()
+	simulation.setAncestorsGen(simulation.agents[len(simulation.agents)-1].generation)
 	{
 		assert.Equal(t, simulation.agents[9].id, 9, "ID being set correctly")
 		assert.Equal(t,

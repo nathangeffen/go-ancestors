@@ -1,3 +1,6 @@
+// Package abm implements an agent based model to simulate population growth
+// over generations in order to increase understanding of ancestry and inheritance.
+
 package abm
 
 import (
@@ -7,25 +10,37 @@ import (
 	"math/rand"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 )
 
+// These can be set on the command line
 type Parameters struct {
 	SimulationId int
 	NumAgents    int
 	Generations  int
 	GrowthRate   float64
+	Monogamous   bool
 	MatingK      int
+	NumGenes     int
+	MutationRate float64
 	Compatible   bool
+	Analysis     string
 }
 
+// Sets the default values for the parameters
 func NewParameters() Parameters {
 	return Parameters{
 		SimulationId: 0,
 		NumAgents:    100,
 		Generations:  4,
 		GrowthRate:   1.01,
+		Monogamous:   true,
 		MatingK:      50,
+		NumGenes:     10,
+		MutationRate: 0.0,
 		Compatible:   true,
+		Analysis:     "NCDG",
 	}
 }
 
@@ -36,6 +51,12 @@ const (
 	FEMALE Sex = 1
 )
 
+// Data structure for each individual in the simulation.
+// We keep both an array and set of ancestors because sometimes
+// one is more efficient to use than the other.
+// Genes are of the form [0-9]+\-[0-9]+`*
+// The first integer is the agent id. The second is the number of the gene.
+// Each backtick represents a mutation.
 type Agent struct {
 	id          int
 	generation  int
@@ -45,8 +66,10 @@ type Agent struct {
 	children    []int
 	ancestorVec []int
 	ancestorSet map[int]struct{}
+	genes       []string
 }
 
+// Checks if two agents share a mother or father in which case they are siblings.
 func isSibling(a, b *Agent) bool {
 	if a.generation == 0 {
 		return false
@@ -54,6 +77,7 @@ func isSibling(a, b *Agent) bool {
 	return a.mother == b.mother || a.father == b.father
 }
 
+// Check if two agents share a grandparent in which case they are cousins.
 func isCousin(agents []Agent, a, b *Agent) bool {
 	if a.generation < 2 || b.generation < 2 {
 		return false
@@ -67,6 +91,7 @@ func isCousin(agents []Agent, a, b *Agent) bool {
 		isSibling(&aFather, &bMother) || isSibling(&aFather, &bFather)
 }
 
+// Finds all the ancestors for a given agent. id is the id of the agent for whom to calculate
 func setAncestors(agents []Agent, id int) {
 	ancestorSet := make(map[int]struct{})
 	ancestorVec := make([]int, 0, agents[id].generation*2)
@@ -76,7 +101,7 @@ func setAncestors(agents []Agent, id int) {
 	for sp < len(ancestorVec) {
 		curr := ancestorVec[sp]
 		currGen := agents[curr].generation
-		if currGen < 1 {
+		if currGen < 1 { // The zero generation has no ancestry
 			break
 		}
 		mother := agents[curr].mother
@@ -99,6 +124,7 @@ func setAncestors(agents []Agent, id int) {
 	agents[id].ancestorSet = ancestorSet
 }
 
+// Generic function to count the number of common elements in two arrays
 func CountCommon[S ~[]E, E constraints.Ordered](vecA S, vecB S) int {
 	i := 0
 	j := 0
@@ -123,6 +149,9 @@ func CountCommon[S ~[]E, E constraints.Ordered](vecA S, vecB S) int {
 	return total
 }
 
+// Calculates the number of generations back you need to go to find
+// a common ancestor between two agents. Maximum value is generation of
+// first agent.
 func generationDiff(agents []Agent, a *Agent, b *Agent) int {
 	generationFound := 0
 	for i := len(a.ancestorVec) - 1; i >= 0; i-- {
@@ -135,25 +164,36 @@ func generationDiff(agents []Agent, a *Agent, b *Agent) int {
 	return a.generation - generationFound
 }
 
+// Used to keep track of agents that are in mating pool.
 type selectedAgent struct {
 	id    int
 	mated bool
 }
 
+// Used to keep track of agents that will reproduce.
 type matingPair struct {
 	male   int
 	female int
 }
 
+// Data structure used by the simulation engine to manage
+// state.
 type Simulation struct {
-	id           int
-	agents       []Agent
-	currGen      []selectedAgent
-	startCurrGen int
-	matingPairs  []matingPair
-	params       Parameters
+	// Unique for each simulation
+	id     int
+	agents []Agent
+	// Indicies of agents in current generation, which is usually
+	// the last one but can be specified.
+	currGen []selectedAgent
+	// Keeps track of the indices that demarcate end of generations
+	genBdrys []int
+	// Agents that are paired to reproduce
+	matingPairs []matingPair
+	// User specified parameters
+	params Parameters
 }
 
+// Creates a new simulation
 func NewSimulation(parameters *Parameters) *Simulation {
 	var simulation Simulation
 	simulation.params = *parameters
@@ -173,9 +213,13 @@ func NewSimulation(parameters *Parameters) *Simulation {
 			mother:     0,
 			father:     0,
 		}
+		for i := range parameters.NumGenes {
+			agent.genes = append(agent.genes, fmt.Sprintf("%d-%d", agent.id, i))
+		}
 		simulation.agents = append(simulation.agents, agent)
 	}
 	// Set current generation
+	simulation.genBdrys = append(simulation.genBdrys, len(simulation.agents))
 	for i := range len(simulation.agents) {
 		selectedAgent := selectedAgent{
 			id:    i,
@@ -194,11 +238,10 @@ func (s *Simulation) compatible(a, b *Agent) bool {
 	return true
 }
 
-// Fills the current_generation vector with the IDs of the latest generation
-func (s *Simulation) setCurrGen() {
+// Fills the generation vector with the IDs of a specified generation
+func (s *Simulation) setGen(generation, start int) {
 	s.currGen = s.currGen[:0]
-	generation := s.agents[len(s.agents)-1].generation
-	for _, agent := range s.agents[s.startCurrGen:] {
+	for _, agent := range s.agents[start:] {
 		if agent.generation == generation {
 			selected := selectedAgent{
 				id:    agent.id,
@@ -207,18 +250,34 @@ func (s *Simulation) setCurrGen() {
 			s.currGen = append(s.currGen, selected)
 		}
 	}
-	s.startCurrGen = s.currGen[0].id
 }
 
-func (s *Simulation) setAncestorsCurrGen() {
-	for i := s.startCurrGen; i < len(s.agents); i++ {
+// Fills the current_generation vector with the IDs of the given generation
+func (s *Simulation) setCurrGen(gen int) {
+	s.currGen = s.currGen[:0]
+	if gen >= len(s.genBdrys) {
+		return
+	}
+	var start int
+	if gen == 0 {
+		start = 0
+	} else {
+		start = s.genBdrys[gen-1]
+	}
+	for _, agent := range s.agents[start:s.genBdrys[gen]] {
+		s.currGen = append(s.currGen, selectedAgent{agent.id, false})
+	}
+}
+
+// Sets the ancestors for every agent in the given generation
+func (s *Simulation) setAncestorsGen(gen int) {
+	for i := s.genBdrys[gen-1]; i < s.genBdrys[gen]; i++ {
 		setAncestors(s.agents, i)
 	}
 }
 
 // Helper function for pairAgents that makes a single pair
 func makePair(agentA *Agent, agentB *Agent) matingPair {
-
 	var pair matingPair
 	if agentA.sex == MALE {
 		pair.male = agentA.id
@@ -255,63 +314,143 @@ func (s *Simulation) pairAgents() {
 	}
 }
 
+func newChild(agents []Agent, father, mother, numGenes, generation int, mutationRate float64) []Agent {
+	var sex Sex
+	if rand.Float64() < 0.5 {
+		sex = MALE
+	} else {
+		sex = FEMALE
+	}
+	agent := Agent{
+		id:         len(agents),
+		generation: generation,
+		sex:        sex,
+		father:     father,
+		mother:     mother,
+	}
+	for i := range numGenes {
+		if rand.Float64() < 0.5 {
+			agent.genes = append(agent.genes, agents[father].genes[i])
+		} else {
+			agent.genes = append(agent.genes, agents[mother].genes[i])
+		}
+		if mutationRate > 0.0 && rand.Float64() < mutationRate {
+			agent.genes[len(agent.genes)-1] += "`"
+		}
+	}
+	agents = append(agents, agent)
+	agents[father].children = append(agents[father].children, agent.id)
+	agents[mother].children = append(agents[mother].children, agent.id)
+	return agents
+}
+
 // Makes children agents from the mating_pairs vector
-func (s *Simulation) makeChildren(generation int) {
+func (s *Simulation) makeChildrenMonogamous(generation int) {
 	iterations := int(math.Ceil(s.params.GrowthRate * float64(len(s.currGen))))
 	for range iterations {
 		pair := s.matingPairs[rand.Intn(len(s.matingPairs))]
-		var sex Sex
-		if rand.Float64() > 0.5 {
-			sex = MALE
-		} else {
-			sex = FEMALE
-		}
-		agent := Agent{
-			id:         len(s.agents),
-			generation: generation,
-			sex:        sex,
-			father:     s.agents[pair.male].id,
-			mother:     s.agents[pair.female].id,
-		}
-		s.agents[pair.male].children = append(s.agents[pair.male].children, agent.id)
-		s.agents[pair.female].children = append(s.agents[pair.male].children, agent.id)
-		s.agents = append(s.agents, agent)
+		s.agents = newChild(s.agents, pair.male, pair.female, s.params.NumGenes, generation, s.params.MutationRate)
 	}
 }
 
-// / This is the simulation engine function
+// Mating strategy in which any given agent mates with at most one other agent
+func (s *Simulation) monogamousMating(generation int) {
+	s.pairAgents()
+	if len(s.matingPairs) > 0 {
+		s.makeChildrenMonogamous(generation + 1)
+	} else {
+		fmt.Fprintln(os.Stderr, s.id, "Error: No mating pairs for generation",
+			generation)
+	}
+}
+
+// Mating strategy in which agents to mate are repeatedly selected to mate with anyone.
+func (s *Simulation) nonMonogamousMating(generation int) {
+	iterations := int(math.Ceil(s.params.GrowthRate * float64(len(s.currGen))))
+	var males, females []int
+	for _, selected := range s.currGen {
+		index := selected.id
+		switch s.agents[index].sex {
+		case MALE:
+			males = append(males, index)
+		case FEMALE:
+			females = append(females, index)
+		}
+	}
+
+	if len(males) == 0 {
+		fmt.Fprintln(os.Stderr, s.id, "Error: No males to make generation",
+			generation)
+		return
+	}
+
+	if len(females) == 0 {
+		fmt.Fprintln(os.Stderr, s.id, "Error: No females to make generation",
+			generation)
+		return
+	}
+
+	for range iterations {
+		i := males[rand.Intn(len(males))]
+		j := females[rand.Intn(len(females))]
+		s.agents = newChild(s.agents, i, j, s.params.NumGenes, generation, s.params.MutationRate)
+	}
+}
+
+// Creates an array of integers in simulation.genBdrys where each integer is
+// one past the simulation.agents index of the last agent with the generation
+// matching the index of the array. This should generally only be needed for
+// testing purposes because the genBdrys array is maintained by the simulation
+// engine as it generates a new generation of agents.
+func (s *Simulation) SetGenBdrys() {
+	s.genBdrys = s.genBdrys[:0]
+	if len(s.agents) == 0 {
+		return
+	}
+	gen := s.agents[0].generation
+	for i := range len(s.agents) {
+		if gen != s.agents[i].generation {
+			gen = s.agents[i].generation
+			s.genBdrys = append(s.genBdrys, i)
+		}
+	}
+	s.genBdrys = append(s.genBdrys, len(s.agents))
+}
+
+// This is the simulation engine function
 func (s *Simulation) Simulate() {
+	s.setCurrGen(0)
 	for i := range s.params.Generations {
-		s.setCurrGen()
-		if len(s.currGen) > 0 {
-			rand.Shuffle(len(s.currGen), func(i, j int) {
-				s.currGen[i], s.currGen[j] = s.currGen[j], s.currGen[i]
-			})
-			s.pairAgents()
-			if len(s.matingPairs) > 0 {
-				s.makeChildren(i + 1)
-			} else {
-				fmt.Println("No mating pairs for generation", i, ".")
-				break
-			}
-		} else {
+		if len(s.currGen) == 0 {
 			fmt.Println("No survivors for generation", i, ".")
 			break
+
 		}
-	}
-	if len(s.agents) > 0 {
-		s.setCurrGen()
+		if len(s.currGen) == 1 {
+			fmt.Println("Only one survivor in generation", i, ".")
+			break
+		}
+		rand.Shuffle(len(s.currGen), func(x, y int) {
+			s.currGen[x], s.currGen[y] = s.currGen[y], s.currGen[x]
+		})
+		if s.params.Monogamous {
+			s.monogamousMating(i)
+		} else {
+			s.nonMonogamousMating(i)
+		}
+		s.genBdrys = append(s.genBdrys, len(s.agents))
+		s.setCurrGen(i + 1)
 	}
 }
 
-// / Reports statistics on number of ancestors agents in the last generation have
+// Reports statistics on number of ancestors agents in the last generation have
 func (s *Simulation) reportNumAncestors() {
 	generation := s.agents[len(s.agents)-1].generation
 	count := 0
 	total := 0
 	min_ := math.MaxInt
 	max_ := math.MinInt
-	start := s.startCurrGen
+	start := s.genBdrys[generation-1]
 	for _, agent := range s.agents[start:] {
 		numAncestors := len(agent.ancestorVec)
 		total += numAncestors
@@ -332,7 +471,8 @@ func (s *Simulation) reportNumAncestors() {
 
 // Reports statistics on the number of common ancestors that agents in the last generation have
 func (s *Simulation) reportCommonAncestors() {
-	start := s.startCurrGen
+	generation := s.agents[len(s.agents)-1].generation
+	start := s.genBdrys[generation-1]
 	total := 0
 	min_ := math.MaxInt
 	max_ := math.MinInt
@@ -348,7 +488,7 @@ func (s *Simulation) reportCommonAncestors() {
 			total += common
 		}
 	}
-	pop := len(s.agents) - s.startCurrGen
+	pop := len(s.agents) - start
 	avg := math.Round(float64(total) / (float64(pop) * float64(pop) / 2.0))
 	fmt.Printf("Min, max, mean number of common ancestors (for last generation): %v %v %v\n", min_, max_, avg)
 }
@@ -390,12 +530,87 @@ func (s *Simulation) reportGenDiff() {
 	fmt.Printf("Min, max, mean generation difference (for last generation): %v %v %v\n", min_, max_, avg)
 }
 
+// Reports statistics on gene distribution across a slice of agents
+func analyzeGenes(agents []Agent) {
+	geneTable := make(map[string]int)
+	individualTable := make(map[int]int)
+	for _, agent := range agents {
+		for _, gene := range agent.genes {
+			geneTable[gene]++
+			components := strings.Split(gene, "-")
+			individual, err1 := strconv.Atoi(components[0])
+			if err1 != nil {
+				fmt.Printf("Error converting gene components to int")
+			} else {
+				individualTable[individual]++
+			}
+		}
+	}
+	generation := agents[0].generation
+	fmt.Printf("Number of different genes in generation %v: %v\n", generation, len(geneTable))
+	maxGene, maxGeneCnt := "", 0
+	for k, v := range geneTable {
+		if v > maxGeneCnt {
+			maxGene, maxGeneCnt = k, v
+		}
+	}
+	fmt.Printf("Most common gene: %s: %d\n", maxGene, maxGeneCnt)
+	maxIndividual, maxIndividualCnt := 0, 0
+	for k, v := range individualTable {
+		if v > maxIndividualCnt {
+			maxIndividual, maxIndividualCnt = k, v
+		}
+	}
+	fmt.Printf("Number original individuals contributing to gene pool %d\n", len(individualTable))
+	fmt.Printf("Most common individual %d %d\n", maxIndividual, maxIndividualCnt)
+	// fmt.Printf("Debug: %+v\n%+v\n", geneTable, individualTable)
+}
+
+// Reports gene statistics for a simulation
+func (s *Simulation) reportGenes() {
+	if len(s.agents) == 0 {
+		return
+	}
+	start := 0
+	generation := s.agents[0].generation
+	for i, agent := range s.agents {
+		if agent.generation != generation {
+			analyzeGenes(s.agents[start:i])
+			start = i
+			generation = agent.generation
+		}
+	}
+	analyzeGenes(s.agents[start:])
+}
+
 // Reports statistics on the outcome of a simulation
 func (s *Simulation) Analysis() {
 	fmt.Printf("For simulation %v:\n", s.id)
 	fmt.Printf("Parameters: %+v\n", s.params)
-	s.setAncestorsCurrGen()
-	s.reportNumAncestors()
-	s.reportCommonAncestors()
-	s.reportGenDiff()
+	if len(s.agents) == 0 {
+		fmt.Printf("No agents in simulation")
+		return
+	}
+	generation := s.agents[len(s.agents)-1].generation
+	if generation == 0 {
+		fmt.Printf("Only zero generation exists")
+		return
+	}
+	s.setAncestorsGen(generation)
+
+	if strings.Contains(s.params.Analysis, "N") {
+		s.reportNumAncestors()
+	}
+
+	if strings.Contains(s.params.Analysis, "C") {
+		s.reportCommonAncestors()
+	}
+
+	if strings.Contains(s.params.Analysis, "D") {
+		s.reportGenDiff()
+	}
+
+	if strings.Contains(s.params.Analysis, "G") {
+		s.reportGenes()
+	}
 }
